@@ -119,6 +119,10 @@ class TurnMetrics:
         self.thinking = registry.histogram(
             "turn_thinking_seconds",
             "Turn commit to first speakable clause (LLM TTFT + clause accumulation)")
+        self.first_token = registry.histogram(
+            "turn_first_token_seconds",
+            "Turn commit to first LLM delta on the token stream "
+            "(raw TTFT, before clause accumulation)")
         self.first_audio = registry.histogram(
             "turn_first_audio_seconds",
             "Turn commit to first audio frame handed to the transport (filler included)")
@@ -147,3 +151,6 @@ class TurnMetrics:
             self.provider_failures.inc()
         elif isinstance(event, events.FallbackSpoken):
             self.fallbacks.inc()
+        elif isinstance(event, events.TokenStreamEnded):
+            if event.first_token_s is not None:
+                self.first_token.observe(event.first_token_s)

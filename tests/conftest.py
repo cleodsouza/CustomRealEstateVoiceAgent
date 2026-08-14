@@ -11,6 +11,7 @@ _DUMMY_ENV = {
     "DEEPGRAM_API_KEY": "test-deepgram-key",
     "VOBIZ_AUTH_ID": "test-vobiz-id",
     "VOBIZ_AUTH_TOKEN": "test-vobiz-token",
+    "VOBIZ_WHATSAPP_CHANNEL_ID": "test-channel-id",
     "WS_AUTH_TOKEN": "test-ws-token",
 }
 for _name, _value in _DUMMY_ENV.items():

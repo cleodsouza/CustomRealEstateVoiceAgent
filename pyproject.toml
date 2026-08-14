@@ -19,6 +19,9 @@ dependencies = [
     # webrtcvad-wheels is the same C library as webrtcvad, published with
     # wheels for modern CPython (the original has none past cp310)
     "webrtcvad-wheels>=2.0.14",
+    # Google Calendar integration (M9): multi-tenant appointment creation
+    "google-auth>=2.25",
+    "requests>=2.31",  # Required by google-auth for requests transport
 ]
 
 [project.optional-dependencies]

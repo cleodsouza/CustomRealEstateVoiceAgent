@@ -115,6 +115,7 @@ def make_sess(monkeypatch, *, filler="", tts=None, tool_registry=None, bus=None)
     monkeypatch.setattr(config, "ENDPOINT_SILENCE_MS", 20)
     monkeypatch.setattr(config, "BARGEIN_MIN_FRAMES", 3)
     monkeypatch.setattr(config, "THINKING_FILLER", filler)
+    monkeypatch.setattr(config, "SPECULATIVE_REPLY", False)
     agent = agent_registry.resolve()
     transport = LocalTransport()
     strategy = executor = None
@@ -364,5 +365,8 @@ async def test_run_loop_plays_greeting_and_cleans_up(sess):
     await sess.run()
     # run() dispatches CallStarted (greeting task starts) then exits on
     # CallEnded; cleanup cancels the in-flight greeting and closes STT.
-    assert sess.stt.started
+    # S7.3: STT connects CONCURRENTLY with the greeting (the greeting no
+    # longer waits ~1.2 s for the recognizer socket), so an immediate
+    # hangup rightly cancels the still-pending connect — `started` is no
+    # longer guaranteed here, `closed` is.
     assert sess.stt.closed

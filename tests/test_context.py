@@ -43,3 +43,37 @@ def test_empty_and_system_only():
     assert trim_history([], max_messages=4, max_chars=100) == []
     sys_only = [{"role": "system", "content": "SYS"}]
     assert trim_history(sys_only, max_messages=4, max_chars=1) == sys_only
+
+
+# ------------------------------------------------------ S4: tool exchanges
+def test_orphaned_tool_result_is_evicted_with_its_call():
+    """Eviction is oldest-first, so the assistant tool-call goes before its
+    result — the result must follow it out, never reach the model alone."""
+    msgs = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "u0"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        {"role": "assistant", "content": "a0"},
+        {"role": "user", "content": "u1"},
+    ]
+    out = trim_history(msgs, max_messages=3, max_chars=10_000)
+    roles = [m["role"] for m in out]
+    assert roles[0] == "system"
+    assert "tool" not in roles          # orphan went with its call
+    assert out[-1]["content"] == "u1"
+
+
+def test_none_content_counts_as_zero_chars():
+    msgs = [
+        {"role": "system", "content": "SYS"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
+    # Must not raise on None content; small char budget keeps the pair.
+    out = trim_history(msgs, max_messages=10, max_chars=100)
+    assert [m["role"] for m in out] == ["system", "assistant", "tool"]

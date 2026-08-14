@@ -58,6 +58,11 @@ class LLMPolicy:
     # budget is really about this model's latency/cost envelope.
     history_max_messages: int
     history_max_chars: int
+    # Feedback-tool round budget per turn (S4): how many times a turn may
+    # halt, execute a feedback tool, and resume with the result before
+    # remaining calls degrade to fire-and-forget. LLM policy because the
+    # cost is model round trips.
+    max_tool_rounds: int = 3
 
 
 @dataclass(frozen=True)

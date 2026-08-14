@@ -47,26 +47,42 @@ def _parse_wav(raw: bytes) -> tuple[int, np.ndarray]:
 
 
 class SarvamTTS:
-    """Implements runtime.interfaces.TTS."""
+    """Implements runtime.interfaces.TTS.
+
+    Holds ONE pooled httpx client for the adapter's lifetime: a fresh
+    client per clause was costing a TCP+TLS handshake on every synthesis —
+    pure latency on the reply path (observed 1.8–5.5 s per clause).
+
+    `preprocessing` asks Sarvam to normalize numerals and mixed-language
+    text before synthesis ("600" spoken as a number, English loanwords
+    pronounced, not spelled). Self-healing: if the endpoint rejects the
+    flag (4xx), it is dropped for the adapter's lifetime and the request
+    retried once without it — a capability probe, not a hard dependency."""
 
     supports_streaming_input = False  # REST: one round-trip per clause
 
     def __init__(
-        self, *, api_key: str, model: str, speaker: str, language: str, pace: float
+        self, *, api_key: str, model: str, speaker: str, language: str,
+        pace: float, preprocessing: bool = True,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._speaker = speaker
         self._language = language
         self._pace = pace
+        self._preprocessing = preprocessing
+        self._client = client if client is not None else httpx.AsyncClient(timeout=15)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def healthy(self) -> bool:
         """SupportsHealth probe. Sarvam exposes no free authenticated GET,
         so this checks reachability only: any HTTP response (even 405 on
         this POST-only route) means the endpoint is up."""
         try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                await client.get(TTS_URL)
+            await self._client.get(TTS_URL)
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -89,14 +105,29 @@ class SarvamTTS:
             "model": self._model,
             "pace": self._pace,
         }
+        if self._preprocessing:
+            # Optional niceties, stripped together if the endpoint objects:
+            # provider-side text normalization, and synthesis directly at
+            # telephony rate (8 kHz) — less audio to generate and ship than
+            # 22.05 kHz that we down-sample anyway.
+            payload["enable_preprocessing"] = True
+            payload["speech_sample_rate"] = 8000
 
         # Failures RAISE (since M8): the ResilientTTS wrapper owns the
         # retry/breaker decision, and the session owns the fallback line.
         # Swallowing here would hide every failure from both.
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(TTS_URL, json=payload, headers=headers)
-            r.raise_for_status()
-            data = r.json()
+        r = await self._client.post(TTS_URL, json=payload, headers=headers)
+        if (r.status_code // 100 == 4) and self._preprocessing:
+            # Capability probe failed: this endpoint/model rejects the
+            # preprocessing flag. Drop it permanently and retry once.
+            log.warning("TTS rejected optional params (%d); disabling them",
+                        r.status_code)
+            self._preprocessing = False
+            payload.pop("enable_preprocessing", None)
+            payload.pop("speech_sample_rate", None)
+            r = await self._client.post(TTS_URL, json=payload, headers=headers)
+        r.raise_for_status()
+        data = r.json()
 
         audios = data.get("audios", [])
         if not audios:

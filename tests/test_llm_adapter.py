@@ -108,3 +108,82 @@ async def test_empty_arguments_become_empty_dict():
     adapter = make_adapter([_tc_chunk(0, name="send_brochure")], {})
     out = [d async for d in adapter.stream([], tools=[{}])]
     assert out == [LLMDelta(tool_call=ToolCallRequest(name="send_brochure", args={}))]
+
+
+# --------------------------------------------------- eager assembly (S1)
+async def test_tool_call_yields_before_trailing_text():
+    """A completed call is yielded the moment text resumes — the pipeline's
+    halt/resume loop needs the call mid-stream, not at stream end."""
+    adapter = make_adapter([
+        _tc_chunk(0, name="check_slots", arguments='{"day": "Sunday"}'),
+        "उस दिन",
+        " समय है।",
+    ], {})
+    out = [d async for d in adapter.stream([], tools=[{}])]
+    assert out == [
+        LLMDelta(tool_call=ToolCallRequest(name="check_slots", args={"day": "Sunday"})),
+        LLMDelta(text="उस दिन"),
+        LLMDelta(text=" समय है।"),
+    ]
+
+
+async def test_second_index_closes_first_tool_call():
+    adapter = make_adapter([
+        _tc_chunk(0, name="check_slots", arguments='{"day": "Sun"}'),
+        _tc_chunk(1, name="send_brochure", arguments='{}'),
+    ], {})
+    out = [d async for d in adapter.stream([], tools=[{}])]
+    assert out == [
+        LLMDelta(tool_call=ToolCallRequest(name="check_slots", args={"day": "Sun"})),
+        LLMDelta(tool_call=ToolCallRequest(name="send_brochure", args={})),
+    ]
+
+
+async def test_fragmented_call_not_flushed_by_same_index_fragments():
+    """Fragments of the SAME call must keep accumulating, never flush early."""
+    adapter = make_adapter([
+        _tc_chunk(0, name="book_site_visit", arguments='{"da'),
+        _tc_chunk(0, arguments='y": "Sunday"}'),
+    ], {})
+    out = [d async for d in adapter.stream([], tools=[{}])]
+    assert out == [LLMDelta(tool_call=ToolCallRequest(
+        name="book_site_visit", args={"day": "Sunday"}))]
+
+
+# ------------------------------------------------- extra_body self-heal (S7)
+def make_adapter_kw(parts, seen_calls, *, reject_extra=False, **adapter_kw):
+    class Rejected(Exception):
+        status_code = 400
+
+    async def create(**kwargs):
+        seen_calls.append(kwargs)
+        if reject_extra and "extra_body" in kwargs:
+            raise Rejected("unknown field")
+        return FakeStream(list(parts))
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(
+        completions=SimpleNamespace(create=create)))
+    return OpenAICompatLLM(
+        base_url="http://unused", api_key="unused", model="test-model",
+        temperature=0.4, client=fake_client, **adapter_kw)
+
+
+async def test_extra_body_is_sent_when_configured():
+    seen: list = []
+    adapter = make_adapter_kw(["ok"], seen,
+                              extra_body={"reasoning_effort": "none"})
+    [d async for d in adapter.stream([])]
+    assert seen[0]["extra_body"] == {"reasoning_effort": "none"}
+
+
+async def test_rejected_extra_body_self_heals_and_stays_off():
+    seen: list = []
+    adapter = make_adapter_kw(["ok"], seen, reject_extra=True,
+                              extra_body={"reasoning_effort": "none"})
+    out = [d.text async for d in adapter.stream([])]
+    assert out == ["ok"]                       # healed within the request
+    assert "extra_body" in seen[0] and "extra_body" not in seen[1]
+
+    [d async for d in adapter.stream([])]
+    assert "extra_body" not in seen[2]         # remembered: off for good
+    assert len(seen) == 3

@@ -26,11 +26,16 @@ import asyncio
 import logging
 import secrets
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote
+from xml.sax.saxutils import escape, quoteattr
 
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 import config
+import dashboard
 from agents import priya_tools
 from providers.llm.openai_compat import OpenAICompatLLM
 from providers.stt.deepgram import DeepgramSTT
@@ -40,6 +45,7 @@ from runtime.agent_registry import resolve as resolve_agent
 from runtime.events import EventBus
 from runtime.interfaces import LLM, TTS, OnSTTEvent, STTFactory, SupportsHealth
 from runtime.metrics import MetricsRegistry, TurnMetrics
+from runtime.tts_cache import CachedTTS
 from runtime.resilience import CircuitBreaker, ResilientLLM, ResilientTTS
 from runtime.sinks import EventLogSubscriber, JsonFormatter, TranscriptWriter
 from runtime.tools import (
@@ -49,7 +55,7 @@ from runtime.tools import (
     ToolExecutor,
     ToolRegistry,
 )
-from runtime.types import STTEvent
+from runtime.types import MULAW_8K, STTEvent
 from session import CallSession
 from transports.vobiz import VobizTransport
 
@@ -64,6 +70,9 @@ log = logging.getLogger("server")
 
 app = FastAPI(title="Northern Heights Voice Agent")
 
+# Mount brochures and other static files at /static
+app.mount("/static", StaticFiles(directory="brochures"), name="static")
+
 # ---------------------------------------------------------------------------
 # Observability wiring (M6): one process-wide bus; sinks subscribe here at
 # the composition root, never inside runtime modules. Every subscriber is
@@ -74,6 +83,7 @@ METRICS = MetricsRegistry()
 BUS.subscribe(EventLogSubscriber())
 BUS.subscribe(TurnMetrics(METRICS))
 BUS.subscribe(TranscriptWriter(config.TRANSCRIPTS_PATH))
+BUS.subscribe(priya_tools.PostCallBrochureSender())  # Auto-send brochure (M7)
 
 # Tool wiring (M7): agents' tool modules register their specs here; agents
 # reference tools by name in their records. Dynamic loading of tool modules
@@ -116,14 +126,27 @@ def _build_providers(agent: AgentConfig) -> _Providers:
         model=agent.llm.model,
         temperature=agent.llm.temperature,
         max_tokens=agent.llm.max_tokens,
+        extra_body=config.LLM_EXTRA_BODY,
     ), breaker=CircuitBreaker())
-    tts: TTS = ResilientTTS(SarvamTTS(
+    # Cache OUTSIDE resilience (S6): a hit replays remembered frames and
+    # never touches the breaker; misses inherit retry/timeout discipline.
+    tts: TTS = CachedTTS(ResilientTTS(SarvamTTS(
         api_key=config.SARVAM_API_KEY,
         model=agent.voice.model,
         speaker=agent.voice.speaker,
         language=agent.voice.language,
         pace=agent.voice.pace,
-    ), breaker=CircuitBreaker())
+        preprocessing=config.TTS_PREPROCESSING,
+    ), breaker=CircuitBreaker(), attempt_timeout_s=config.TTS_ATTEMPT_TIMEOUT_S))
+    # Opportunistic prewarm of the agent's static lines so even the first
+    # call's greeting starts instantly; fire-and-forget off the hot path.
+    # (No running loop — e.g. a sync test building providers — skips it.)
+    try:
+        asyncio.create_task(tts.prewarm(
+            [agent.greeting, agent.turn.filler, agent.turn.fallback_line],
+            MULAW_8K))
+    except RuntimeError:
+        pass
 
     def stt_factory(on_event: OnSTTEvent) -> DeepgramSTT:
         return DeepgramSTT(
@@ -138,14 +161,29 @@ def _build_providers(agent: AgentConfig) -> _Providers:
     specs = TOOL_REGISTRY.resolve(agent.tools)
     strategy: ToolDispatchStrategy
     if agent.llm.tool_dispatch == "native":
-        strategy = NativeToolStrategy(specs)
+        strategy = NativeToolStrategy(specs,
+                                      max_tool_rounds=agent.llm.max_tool_rounds)
     else:
-        strategy = MarkerToolStrategy(specs)
+        strategy = MarkerToolStrategy(specs,
+                                      max_tool_rounds=agent.llm.max_tool_rounds)
 
     providers = _Providers(stt_factory=stt_factory, tts=tts, llm=llm,
                            tool_strategy=strategy)
     _provider_cache[agent.agent_id] = providers
     return providers
+
+
+@app.on_event("startup")
+async def _warm_default_agent() -> None:
+    """Build the default agent's providers while the server is idle: the
+    TTS prewarm (greeting/filler/fallback) runs long before any call, so
+    even call #1's greeting replays from cache instead of paying a live
+    synthesis (observed 3-4 s). Warmup failure is logged, never fatal —
+    the first call simply pays what it always paid."""
+    try:
+        _build_providers(resolve_agent())
+    except Exception:  # noqa: BLE001 — warmup must never block startup
+        log.exception("Provider warmup failed; first call pays the cost")
 
 
 # M8 (D10 closed): every webhook route requires the shared secret in its
@@ -177,6 +215,12 @@ async def answer(request: Request):
     ws_url = f"wss://{config.PUBLIC_HOST}/ws?token={config.WS_AUTH_TOKEN}"
     if agent_id:
         ws_url += f"&agent={agent_id}"
+    # Same trick for the caller's number: Vobiz's WS "start" frame carries
+    # no caller field at all, so it has to ride through here from the one
+    # place Vobiz does hand it to us — this webhook's From param.
+    caller = form.get("From", "")
+    if caller:
+        ws_url += f"&from={quote(caller)}"
     status_url = (f"https://{config.PUBLIC_HOST}/stream-status"
                   f"?token={config.WS_AUTH_TOKEN}")
     xml = (
@@ -184,8 +228,8 @@ async def answer(request: Request):
         "<Response>"
         f'<Stream bidirectional="true" keepCallAlive="true" '
         f'contentType="audio/x-mulaw;rate=8000" '
-        f'statusCallbackUrl="{status_url}" statusCallbackMethod="POST">'
-        f"{ws_url}"
+        f'statusCallbackUrl={quoteattr(status_url)} statusCallbackMethod="POST">'
+        f"{escape(ws_url)}"
         "</Stream>"
         "</Response>"
     )
@@ -242,6 +286,30 @@ async def health(deep: bool = False):
     return {"status": "ok" if ok else "degraded", "providers": results}
 
 
+# ---------------------------------------------------------------------------
+# Operations dashboard — an observability *consumer*: it reads the JSONL
+# files the sinks already write and renders them. It subscribes to nothing
+# and holds no state; deleting these two routes changes nothing about a
+# call. Token-gated like the webhooks (transcript-derived data is PII):
+# open /dashboard?token=<WS_AUTH_TOKEN>.
+# ---------------------------------------------------------------------------
+@app.get("/dashboard")
+async def dashboard_page(request: Request):
+    if not _webhook_authorized(request):
+        return PlainTextResponse("Forbidden", status_code=403)
+    return FileResponse(Path(__file__).parent / "dashboard.html",
+                        media_type="text/html")
+
+
+@app.get("/dashboard/data")
+async def dashboard_data(request: Request):
+    if not _webhook_authorized(request):
+        return PlainTextResponse("Forbidden", status_code=403)
+    # File parsing runs off the event loop; a live call never waits on it.
+    return await asyncio.to_thread(
+        dashboard.build_snapshot, config.TRANSCRIPTS_PATH, config.BOOKINGS_PATH)
+
+
 @app.get("/metrics")
 async def metrics():
     return PlainTextResponse(
@@ -264,7 +332,8 @@ async def ws(websocket: WebSocket):
     providers = _build_providers(agent)
     log.info("Vobiz WebSocket connected (agent=%s)", agent.agent_id)
 
-    transport = VobizTransport(websocket)
+    caller = websocket.query_params.get("from") or None
+    transport = VobizTransport(websocket, caller=caller)
     session = CallSession(
         transport, agent=agent,
         stt_factory=providers.stt_factory, tts=providers.tts, llm=providers.llm,

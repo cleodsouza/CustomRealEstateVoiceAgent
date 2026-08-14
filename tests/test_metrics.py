@@ -56,3 +56,17 @@ async def test_turn_metrics_projects_events():
     assert tm.thinking.count == 1          # None latencies never observed
     assert tm.first_audio.count == 1
     assert tm.bargein_reaction.count == 1
+
+
+async def test_token_stream_ended_feeds_first_token_histogram():
+    """S3: raw TTFT lands in turn_first_token_seconds; a turn with no
+    tokens (tool-only or failed stream) observes nothing."""
+    from runtime.metrics import MetricsRegistry, TurnMetrics
+
+    tm = TurnMetrics(MetricsRegistry())
+    await tm(events.TokenStreamEnded(call_id="c1", turn_seq=1,
+                                     tokens=7, first_token_s=0.12))
+    assert tm.first_token.count == 1 and tm.first_token.sum == 0.12
+    await tm(events.TokenStreamEnded(call_id="c1", turn_seq=2,
+                                     tokens=0, first_token_s=None))
+    assert tm.first_token.count == 1

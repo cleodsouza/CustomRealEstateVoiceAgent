@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Runtime Operations</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:         #f9f9f7;
+    --surface-1:    #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary:#52514e;
+    --text-muted:   #898781;
+    --grid:         #e1e0d9;
+    --baseline:     #c3c2b7;
+    --border:       rgba(11,11,11,0.10);
+    --series-1:     #2a78d6;   /* blue  — calls, first-audio, histogram */
+    --series-2:     #1baf7a;   /* aqua  — thinking time                 */
+    --series-3:     #eda100;   /* yellow — interrupted turns            */
+    --delta-good:   #006300;
+    --delta-bad:    #d03b3b;
+    --status-good:  #0ca30c;
+    --hover-wash:   rgba(11,11,11,0.045);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:         #0d0d0d;
+      --surface-1:    #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary:#c3c2b7;
+      --text-muted:   #898781;
+      --grid:         #2c2c2a;
+      --baseline:     #383835;
+      --border:       rgba(255,255,255,0.10);
+      --series-1:     #3987e5;
+      --series-2:     #199e70;
+      --series-3:     #c98500;
+      --delta-good:   #0ca30c;
+      --delta-bad:    #d03b3b;
+      --hover-wash:   rgba(255,255,255,0.06);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:         #0d0d0d;
+    --surface-1:    #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary:#c3c2b7;
+    --text-muted:   #898781;
+    --grid:         #2c2c2a;
+    --baseline:     #383835;
+    --border:       rgba(255,255,255,0.10);
+    --series-1:     #3987e5;
+    --series-2:     #199e70;
+    --series-3:     #c98500;
+    --delta-good:   #0ca30c;
+    --delta-bad:    #d03b3b;
+    --hover-wash:   rgba(255,255,255,0.06);
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .dash { max-width: 1180px; margin: 0 auto; padding: 28px 24px 56px; }
+
+  /* ---- header ---- */
+  .head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  .head h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+  .head .sub { color: var(--text-secondary); font-size: 13px; }
+  .head .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 12px; background: var(--surface-1);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+  .pill.ok .dot { background: var(--status-good); }
+
+  /* ---- filter row ---- */
+  .filters { display: flex; gap: 6px; margin: 22px 0 18px; }
+  .filters button {
+    font: 13px system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-secondary);
+    background: transparent; border: 1px solid transparent;
+    border-radius: 7px; padding: 5px 12px; cursor: pointer;
+  }
+  .filters button:hover { background: var(--hover-wash); }
+  .filters button[aria-pressed="true"] {
+    color: var(--text-primary); font-weight: 600;
+    background: var(--surface-1); border-color: var(--border);
+  }
+
+  /* ---- KPI tiles ---- */
+  .kpis {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    margin-bottom: 14px;
+  }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px 13px;
+  }
+  .tile .label { font-size: 12.5px; color: var(--text-secondary); }
+  .tile .value { font-size: 30px; font-weight: 600; letter-spacing: -0.01em; margin-top: 2px; }
+  .tile .value .unit { font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-left: 1px; }
+  .tile .delta { font-size: 12px; margin-top: 3px; color: var(--text-muted); }
+  .tile .delta.good { color: var(--delta-good); }
+  .tile .delta.bad  { color: var(--delta-bad); }
+
+  /* ---- cards & charts ---- */
+  .grid {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 16px 10px; min-width: 0;
+  }
+  .card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .card-head h2 { font-size: 14px; font-weight: 600; }
+  .card-head .desc { font-size: 12px; color: var(--text-muted); }
+  .card-head .spacer { flex: 1; }
+  .toggle {
+    font: 11.5px system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-secondary); background: transparent;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 2px 9px; cursor: pointer;
+  }
+  .toggle:hover { background: var(--hover-wash); }
+  .chart-body { position: relative; min-height: 200px; }
+  .chart-body svg { display: block; width: 100%; }
+  .legend { display: flex; gap: 16px; padding: 6px 2px 4px; }
+  .legend .key { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .legend .swatch-rect { width: 10px; height: 10px; border-radius: 2.5px; }
+  .legend .swatch-line { width: 14px; height: 2px; border-radius: 1px; }
+  .empty { color: var(--text-muted); font-size: 13px; padding: 60px 0; text-align: center; }
+
+  svg text { font: 11px system-ui, -apple-system, "Segoe UI", sans-serif; fill: var(--text-muted); }
+  svg .tick-num { font-variant-numeric: tabular-nums; }
+  svg .end-label { font-size: 11.5px; font-weight: 600; fill: var(--text-secondary); }
+
+  /* ---- tooltip ---- */
+  .tip {
+    position: fixed; z-index: 10; pointer-events: none; display: none;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 11px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.13); font-size: 12px; min-width: 130px;
+  }
+  .tip .tip-title { color: var(--text-muted); margin-bottom: 4px; }
+  .tip .row { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+  .tip .row .key { width: 12px; height: 2.5px; border-radius: 1px; flex: none; }
+  .tip .row .val { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .tip .row .name { color: var(--text-secondary); }
+
+  /* ---- tables ---- */
+  .tables {
+    display: grid; gap: 12px; margin-top: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  }
+  @media (max-width: 560px) { .tables { grid-template-columns: 1fr; } }
+  .tbl-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-size: 11.5px; font-weight: 600;
+    color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 7px 10px 7px 0; border-bottom: 1px solid var(--grid);
+  }
+  td {
+    padding: 7px 10px 7px 0; border-bottom: 1px solid var(--grid);
+    color: var(--text-primary); white-space: nowrap;
+  }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .muted { color: var(--text-muted); }
+  .foot { margin-top: 20px; font-size: 12px; color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="dash">
+  <div class="head">
+    <h1>Voice Runtime Operations</h1>
+    <span class="sub">Northern Heights agent</span>
+    <span class="spacer"></span>
+    <span class="pill" id="health-pill"><span class="dot"></span><span id="health-text">Checking…</span></span>
+  </div>
+
+  <div class="filters" id="filters" role="group" aria-label="Date range"></div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="grid">
+    <div class="card" id="card-calls"></div>
+    <div class="card" id="card-latency"></div>
+    <div class="card" id="card-turns"></div>
+    <div class="card" id="card-hist"></div>
+  </div>
+
+  <div class="tables">
+    <div class="card" id="card-recent-calls"></div>
+    <div class="card" id="card-bookings"></div>
+  </div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+/* All rendering below builds DOM via createElement/textContent — booking
+   names and transcript-derived strings are untrusted data. */
+
+const PARAMS = new URLSearchParams(location.search);
+const TOKEN = PARAMS.get("token") || "";
+// ?theme=light|dark overrides the OS preference (same data-theme hook a
+// host shell's theme toggle would stamp).
+if (PARAMS.get("theme")) document.documentElement.dataset.theme = PARAMS.get("theme");
+const SVGNS = "http://www.w3.org/2000/svg";
+const DAY_MS = 86400000;
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const COLORS = () => ({
+  s1: css("--series-1"), s2: css("--series-2"), s3: css("--series-3"),
+  grid: css("--grid"), baseline: css("--baseline"), surface: css("--surface-1"),
+});
+
+let SNAPSHOT = null;
+let RANGE_DAYS = 30;                        // default preset
+const PRESETS = [["Last 7 days", 7], ["Last 30 days", 30], ["Last 90 days", 90], ["All time", 0]];
+const VIEW_MODE = {};                       // chartId -> "chart" | "table"
+
+// ---------- helpers ----------
+const parseTs = s => s ? new Date(s.replace(" ", "T")) : null;
+const dayKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const fmtDay = k => new Date(k + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const fmtWhen = d => d ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+const fmtSecs = v => v == null ? "—" : v >= 10 ? Math.round(v) + "s" : v.toFixed(1) + "s";
+const fmtDur = s => s == null ? "—" : `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
+const median = a => {
+  if (!a.length) return null;
+  const s = [...a].sort((x, y) => x - y), m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+function elx(tag, attrs = {}, parent = null) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function div(cls, parent, text) {
+  const n = document.createElement("div");
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  if (parent) parent.appendChild(n);
+  return n;
+}
+/* Clean axis scale: ticks land on 1/2/5×10^k steps, top tick >= max. */
+function niceScale(max) {
+  if (max <= 0) return { yMax: 1, step: 1 };
+  const raw = max / 4;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  let step = 10 * pow;
+  for (const m of [1, 2, 5]) if (m * pow >= raw) { step = m * pow; break; }
+  return { yMax: step * Math.ceil(max / step), step };
+}
+
+// ---------- data slicing ----------
+function callDate(c) { return parseTs(c.started || c.ended); }
+
+function sliceRange(days) {
+  const calls = SNAPSHOT.calls.filter(c => callDate(c));
+  const bookings = SNAPSHOT.bookings.filter(b => parseTs(b.ts));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  let from, to = new Date(today.getTime() + DAY_MS - 1);
+  if (days > 0) {
+    from = new Date(today.getTime() - (days - 1) * DAY_MS);
+  } else {
+    const all = [...calls.map(c => callDate(c)), ...bookings.map(b => parseTs(b.ts))];
+    from = all.length ? new Date(Math.min(...all.map(d => d.getTime()))) : today;
+    from = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+  }
+  const inWin = (d, a, b) => d >= a && d <= b;
+  const cur = {
+    calls: calls.filter(c => inWin(callDate(c), from, to)),
+    bookings: bookings.filter(b => inWin(parseTs(b.ts), from, to)),
+    from, to,
+  };
+  let prev = null;
+  if (days > 0) {
+    const pTo = new Date(from.getTime() - 1), pFrom = new Date(from.getTime() - days * DAY_MS);
+    prev = {
+      calls: calls.filter(c => inWin(callDate(c), pFrom, pTo)),
+      bookings: bookings.filter(b => inWin(parseTs(b.ts), pFrom, pTo)),
+    };
+  }
+  return { cur, prev };
+}
+
+function dailySeries(slice) {
+  const byDay = new Map();
+  for (let t = slice.from.getTime(); t <= slice.to.getTime(); t += DAY_MS)
+    byDay.set(dayKey(new Date(t)), { calls: 0, ok: 0, cut: 0, firstAudio: [], thinking: [] });
+  for (const c of slice.calls) {
+    const d = byDay.get(dayKey(callDate(c)));
+    if (!d) continue;
+    d.calls += 1;
+    for (const t of c.turns) {
+      t.interrupted ? d.cut++ : d.ok++;
+      if (t.first_audio_s != null) d.firstAudio.push(t.first_audio_s);
+      if (t.thinking_s != null) d.thinking.push(t.thinking_s);
+    }
+  }
+  return [...byDay.entries()].map(([k, d]) => ({
+    day: k, calls: d.calls, ok: d.ok, cut: d.cut,
+    medFirstAudio: median(d.firstAudio), medThinking: median(d.thinking),
+  }));
+}
+
+const allTurns = slice => slice.calls.flatMap(c => c.turns);
+
+// ---------- tooltip ----------
+const tip = document.getElementById("tip");
+function showTip(x, y, title, rows) {
+  tip.replaceChildren();
+  div("tip-title", tip, title);
+  for (const r of rows) {
+    const row = div("row", tip);
+    const key = div("key", row); key.style.background = r.color;
+    div("val", row, r.value);
+    div("name", row, r.name);
+  }
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(x + 14, innerWidth - w - 8) + "px";
+  tip.style.top = Math.max(8, Math.min(y - h - 12, innerHeight - h - 8)) + "px";
+}
+const hideTip = () => { tip.style.display = "none"; };
+
+// ---------- chart scaffolding ----------
+const M = { top: 12, right: 44, bottom: 24, left: 34 };
+
+function frame(svg, w, h, scale, yFmt, C) {
+  const { yMax, step } = scale;
+  const plotW = w - M.left - M.right, plotH = h - M.top - M.bottom;
+  const ySteps = Math.round(yMax / step);
+  for (let i = 0; i <= ySteps; i++) {
+    const yv = step * i, y = M.top + plotH - plotH * i / ySteps;
+    if (i > 0) elx("line", { x1: M.left, x2: M.left + plotW, y1: y, y2: y, stroke: C.grid, "stroke-width": 1 }, svg);
+    const t = elx("text", { x: M.left - 7, y: y + 3.5, "text-anchor": "end", class: "tick-num" }, svg);
+    t.textContent = yFmt(yv);
+  }
+  elx("line", { x1: M.left, x2: M.left + plotW, y1: M.top + plotH, y2: M.top + plotH, stroke: C.baseline, "stroke-width": 1 }, svg);
+  return { plotW, plotH };
+}
+
+function xTicks(svg, series, xPos, plotH) {
+  const n = series.length, want = Math.min(6, n);
+  const step = Math.max(1, Math.floor(n / want));
+  for (let i = 0; i < n; i += step) {
+    const t = elx("text", { x: xPos(i), y: M.top + plotH + 16, "text-anchor": "middle" }, svg);
+    t.textContent = fmtDay(series[i].day);
+  }
+}
+
+/* Column path: 4px rounded data-end, square baseline. */
+function colPath(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  return `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z`;
+}
+
+function cardShell(id, title, desc, renderChart, renderTable) {
+  const card = document.getElementById(id);
+  card.replaceChildren();
+  const head = div("card-head", card);
+  const h2 = document.createElement("h2"); h2.textContent = title; head.appendChild(h2);
+  div("desc", head, desc);
+  div("spacer", head);
+  const mode = VIEW_MODE[id] || "chart";
+  const btn = document.createElement("button");
+  btn.className = "toggle";
+  btn.textContent = mode === "chart" ? "Table" : "Chart";
+  btn.setAttribute("aria-label", mode === "chart" ? "Show as table" : "Show as chart");
+  btn.onclick = () => { VIEW_MODE[id] = mode === "chart" ? "table" : "chart"; render(); };
+  head.appendChild(btn);
+  const body = div(mode === "chart" ? "chart-body" : "tbl-wrap", card);
+  mode === "chart" ? renderChart(body) : renderTable(body);
+  return card;
+}
+
+function buildTable(parent, headers, rows) {
+  const table = document.createElement("table");
+  const thead = document.createElement("thead"), trh = document.createElement("tr");
+  headers.forEach(hd => {
+    const th = document.createElement("th");
+    th.textContent = hd.label; if (hd.num) th.className = "num";
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh); table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  rows.forEach(r => {
+    const tr = document.createElement("tr");
+    r.forEach((cell, i) => {
+      const td = document.createElement("td");
+      td.textContent = cell == null ? "—" : cell;
+      if (headers[i].num) td.className = "num";
+      if (cell == null) td.classList.add("muted");
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody); parent.appendChild(table);
+}
+
+// ---------- charts ----------
+function chartCallsPerDay(daily) {
+  cardShell("card-calls", "Calls per day", "answered call sessions",
+    body => {
+      if (!daily.some(d => d.calls > 0)) return void div("empty", body, "No calls in this range");
+      const C = COLORS(), w = body.clientWidth || 500, h = 208;
+      const svg = elx("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h }, body);
+      const scale = niceScale(Math.max(...daily.map(d => d.calls))), yMax = scale.yMax;
+      const { plotW, plotH } = frame(svg, w, h, scale, v => String(Math.round(v)), C);
+      const band = plotW / daily.length;
+      const bw = Math.min(24, Math.max(3, band * 0.55));
+      const xPos = i => M.left + band * i + band / 2;
+      xTicks(svg, daily, xPos, plotH);
+      daily.forEach((d, i) => {
+        const bh = plotH * d.calls / yMax;
+        let bar = null;
+        if (d.calls > 0)
+          bar = elx("path", { d: colPath(xPos(i) - bw / 2, M.top + plotH - bh, bw, bh, 4), fill: C.s1 }, svg);
+        const hit = elx("rect", { x: M.left + band * i, y: M.top, width: band, height: plotH, fill: "transparent" }, svg);
+        hit.addEventListener("pointermove", e => {
+          if (bar) bar.style.filter = "brightness(1.12)";
+          showTip(e.clientX, e.clientY, fmtDay(d.day), [{ color: C.s1, value: String(d.calls), name: d.calls === 1 ? "call" : "calls" }]);
+        });
+        hit.addEventListener("pointerleave", () => { if (bar) bar.style.filter = ""; hideTip(); });
+      });
+    },
+    body => buildTable(body, [{ label: "Day" }, { label: "Calls", num: true }],
+      daily.filter(d => d.calls > 0).map(d => [fmtDay(d.day), d.calls])));
+}
+
+function chartLatency(daily) {
+  const series = [
+    { name: "Response (first audio)", key: "medFirstAudio", colorKey: "s1" },
+    { name: "Thinking (LLM)", key: "medThinking", colorKey: "s2" },
+  ];
+  cardShell("card-latency", "Response latency", "daily median per turn, seconds",
+    body => {
+      const pts = daily.filter(d => d.medFirstAudio != null || d.medThinking != null);
+      if (!pts.length) return void div("empty", body, "No turns in this range");
+      const C = COLORS(), w = body.clientWidth || 500, h = 208;
+      const legend = div("legend", body);
+      for (const s of series) {
+        const k = div("key", legend);
+        const sw = div("swatch-line", k); sw.style.background = C[s.colorKey];
+        k.appendChild(document.createTextNode(s.name));
+      }
+      const svg = elx("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h }, body);
+      const vals = daily.flatMap(d => [d.medFirstAudio, d.medThinking]).filter(v => v != null);
+      const scale = niceScale(Math.max(...vals)), yMax = scale.yMax;
+      const { plotW, plotH } = frame(svg, w, h, scale, v => v ? fmtSecs(v) : "0", C);
+      const xPos = i => M.left + (daily.length === 1 ? plotW / 2 : plotW * i / (daily.length - 1));
+      const yPos = v => M.top + plotH - plotH * v / yMax;
+      xTicks(svg, daily, xPos, plotH);
+
+      const endLabels = [];
+      for (const s of series) {
+        const segs = [];
+        let seg = [];
+        daily.forEach((d, i) => {
+          if (d[s.key] == null) { if (seg.length) segs.push(seg); seg = []; }
+          else seg.push([xPos(i), yPos(d[s.key]), d[s.key]]);
+        });
+        if (seg.length) segs.push(seg);
+        for (const sg of segs) {
+          if (sg.length > 1)
+            elx("path", { d: "M" + sg.map(p => `${p[0]},${p[1]}`).join(" L"), fill: "none", stroke: C[s.colorKey], "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }, svg);
+          for (const p of sg)
+            elx("circle", { cx: p[0], cy: p[1], r: 4, fill: C[s.colorKey], stroke: C.surface, "stroke-width": 2 }, svg);
+        }
+        const last = segs.length ? segs[segs.length - 1][segs[segs.length - 1].length - 1] : null;
+        if (last) endLabels.push({ x: last[0], y: last[1], v: last[2] });
+      }
+      // Direct end-labels only when they don't collide; tooltip carries the rest.
+      if (endLabels.length === 2 && Math.abs(endLabels[0].y - endLabels[1].y) < 14) endLabels.length = 0;
+      for (const L of endLabels) {
+        const t = elx("text", { x: L.x + 9, y: L.y + 4, class: "end-label" }, svg);
+        t.textContent = fmtSecs(L.v);
+      }
+
+      // Crosshair: snaps to nearest day; one tooltip, every series.
+      const cross = elx("line", { y1: M.top, y2: M.top + plotH, stroke: C.baseline, "stroke-width": 1, visibility: "hidden" }, svg);
+      const overlay = elx("rect", { x: M.left, y: M.top, width: plotW, height: plotH, fill: "transparent" }, svg);
+      overlay.addEventListener("pointermove", e => {
+        const r = svg.getBoundingClientRect();
+        const mx = (e.clientX - r.left) * (w / r.width);
+        let best = 0, bd = Infinity;
+        daily.forEach((_, i) => { const d0 = Math.abs(xPos(i) - mx); if (d0 < bd) { bd = d0; best = i; } });
+        cross.setAttribute("x1", xPos(best)); cross.setAttribute("x2", xPos(best));
+        cross.setAttribute("visibility", "visible");
+        showTip(e.clientX, e.clientY, fmtDay(daily[best].day), series.map(s => ({
+          color: C[s.colorKey], value: fmtSecs(daily[best][s.key]), name: s.name,
+        })));
+      });
+      overlay.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+    },
+    body => buildTable(body,
+      [{ label: "Day" }, { label: "Response", num: true }, { label: "Thinking", num: true }],
+      daily.filter(d => d.medFirstAudio != null || d.medThinking != null)
+        .map(d => [fmtDay(d.day), fmtSecs(d.medFirstAudio), fmtSecs(d.medThinking)])));
+}
+
+function chartTurns(daily) {
+  cardShell("card-turns", "Turn outcomes per day", "spoken fully vs interrupted",
+    body => {
+      if (!daily.some(d => d.ok + d.cut > 0)) return void div("empty", body, "No turns in this range");
+      const C = COLORS(), w = body.clientWidth || 500, h = 208;
+      const legend = div("legend", body);
+      for (const [name, color] of [["Completed", C.s1], ["Interrupted", C.s3]]) {
+        const k = div("key", legend);
+        const sw = div("swatch-rect", k); sw.style.background = color;
+        k.appendChild(document.createTextNode(name));
+      }
+      const svg = elx("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h }, body);
+      const scale = niceScale(Math.max(...daily.map(d => d.ok + d.cut))), yMax = scale.yMax;
+      const { plotW, plotH } = frame(svg, w, h, scale, v => String(Math.round(v)), C);
+      const band = plotW / daily.length;
+      const bw = Math.min(24, Math.max(3, band * 0.55));
+      const xPos = i => M.left + band * i + band / 2;
+      xTicks(svg, daily, xPos, plotH);
+      daily.forEach((d, i) => {
+        const total = d.ok + d.cut;
+        if (total === 0) { attachHit(i, d, []); return; }
+        const x = xPos(i) - bw / 2, base = M.top + plotH;
+        const hOk = plotH * d.ok / yMax, hCut = plotH * d.cut / yMax;
+        const marks = [];
+        if (d.ok > 0 && d.cut > 0) {
+          // 2px surface gap between segments comes out of the lower one,
+          // which stays square and anchored to the baseline
+          marks.push(elx("rect", { x, y: base - hOk + 2, width: bw, height: Math.max(1, hOk - 2), fill: C.s1 }, svg));
+          marks.push(elx("path", { d: colPath(x, base - hOk - hCut, bw, Math.max(1, hCut), 4), fill: C.s3 }, svg));
+        } else if (d.ok > 0) {
+          marks.push(elx("path", { d: colPath(x, base - hOk, bw, hOk, 4), fill: C.s1 }, svg));
+        } else {
+          marks.push(elx("path", { d: colPath(x, base - hCut, bw, hCut, 4), fill: C.s3 }, svg));
+        }
+        attachHit(i, d, marks);
+      });
+      function attachHit(i, d, marks) {
+        const hit = elx("rect", { x: M.left + band * i, y: M.top, width: band, height: plotH, fill: "transparent" }, svg);
+        hit.addEventListener("pointermove", e => {
+          marks.forEach(m => m.style.filter = "brightness(1.12)");
+          showTip(e.clientX, e.clientY, fmtDay(d.day), [
+            { color: C.s1, value: String(d.ok), name: "completed" },
+            { color: C.s3, value: String(d.cut), name: "interrupted" },
+          ]);
+        });
+        hit.addEventListener("pointerleave", () => { marks.forEach(m => m.style.filter = ""); hideTip(); });
+      }
+    },
+    body => buildTable(body,
+      [{ label: "Day" }, { label: "Completed", num: true }, { label: "Interrupted", num: true }],
+      daily.filter(d => d.ok + d.cut > 0).map(d => [fmtDay(d.day), d.ok, d.cut])));
+}
+
+function chartHistogram(turns) {
+  const vals = turns.map(t => t.first_audio_s).filter(v => v != null);
+  const BIN = 1, MAXBIN = 9; // 1-second bins, last bin is 9s+
+  const bins = Array.from({ length: MAXBIN + 1 }, (_, i) => ({
+    label: i < MAXBIN ? `${i}–${i + 1}s` : `${MAXBIN}s+`, n: 0,
+  }));
+  for (const v of vals) bins[Math.min(Math.floor(v / BIN), MAXBIN)].n++;
+  while (bins.length > 3 && bins[bins.length - 1].n === 0) bins.pop();
+
+  cardShell("card-hist", "Response time distribution", "turns by time to first audio",
+    body => {
+      if (!vals.length) return void div("empty", body, "No turns in this range");
+      const C = COLORS(), w = body.clientWidth || 500, h = 208;
+      const svg = elx("svg", { viewBox: `0 0 ${w} ${h}`, width: w, height: h }, body);
+      const scale = niceScale(Math.max(...bins.map(b => b.n))), yMax = scale.yMax;
+      const { plotW, plotH } = frame(svg, w, h, scale, v => String(Math.round(v)), C);
+      const band = plotW / bins.length;
+      const bw = Math.min(24, Math.max(6, band * 0.55));
+      bins.forEach((b, i) => {
+        const cx = M.left + band * i + band / 2;
+        const t = elx("text", { x: cx, y: M.top + plotH + 16, "text-anchor": "middle", class: "tick-num" }, svg);
+        t.textContent = b.label;
+        let bar = null;
+        if (b.n > 0) {
+          const bh = plotH * b.n / yMax;
+          bar = elx("path", { d: colPath(cx - bw / 2, M.top + plotH - bh, bw, bh, 4), fill: C.s1 }, svg);
+        }
+        const hit = elx("rect", { x: M.left + band * i, y: M.top, width: band, height: plotH, fill: "transparent" }, svg);
+        hit.addEventListener("pointermove", e => {
+          if (bar) bar.style.filter = "brightness(1.12)";
+          showTip(e.clientX, e.clientY, b.label, [{ color: C.s1, value: String(b.n), name: b.n === 1 ? "turn" : "turns" }]);
+        });
+        hit.addEventListener("pointerleave", () => { if (bar) bar.style.filter = ""; hideTip(); });
+      });
+    },
+    body => buildTable(body, [{ label: "Bucket" }, { label: "Turns", num: true }],
+      bins.map(b => [b.label, b.n])));
+}
+
+// ---------- KPI tiles ----------
+function kpiTiles(cur, prev) {
+  const wrap = document.getElementById("kpis");
+  wrap.replaceChildren();
+  const turns = allTurns(cur), pTurns = prev ? allTurns(prev) : null;
+  const firstAudio = turns.map(t => t.first_audio_s).filter(v => v != null);
+  const cutRate = t => t.length ? t.filter(x => x.interrupted).length / t.length : null;
+
+  const tiles = [
+    { label: "Calls", value: String(cur.calls.length), cur: cur.calls.length,
+      prev: prev ? prev.calls.length : null, upGood: true,
+      fmtDelta: d => (d > 0 ? "+" : "") + d },
+    { label: "Site visits booked", value: String(cur.bookings.length), cur: cur.bookings.length,
+      prev: prev ? prev.bookings.length : null, upGood: true,
+      fmtDelta: d => (d > 0 ? "+" : "") + d },
+    { label: "Median response", value: median(firstAudio), unit: "s", upGood: false,
+      cur: median(firstAudio),
+      prev: prev ? median(prev.calls.flatMap(c => c.turns).map(t => t.first_audio_s).filter(v => v != null)) : null,
+      fmtVal: v => v == null ? "—" : v.toFixed(1),
+      fmtDelta: d => (d > 0 ? "+" : "") + d.toFixed(1) + "s" },
+    { label: "Interrupted turns", value: cutRate(turns), unit: "%", upGood: false,
+      cur: cutRate(turns), prev: pTurns ? cutRate(pTurns) : null,
+      fmtVal: v => v == null ? "—" : Math.round(v * 100),
+      fmtDelta: d => (d > 0 ? "+" : "") + Math.round(d * 100) + " pts" },
+  ];
+
+  for (const t of tiles) {
+    const tile = div("tile", wrap);
+    div("label", tile, t.label);
+    const val = div("value", tile);
+    val.appendChild(document.createTextNode(t.fmtVal ? t.fmtVal(t.cur) : t.value));
+    if (t.unit && t.cur != null) {
+      const u = document.createElement("span"); u.className = "unit"; u.textContent = t.unit;
+      val.appendChild(u);
+    }
+    const delta = div("delta", tile);
+    if (t.prev != null && t.cur != null) {
+      const d = t.cur - t.prev;
+      if (d === 0) delta.textContent = "no change vs previous period";
+      else {
+        delta.textContent = `${t.fmtDelta(d)} vs previous period`;
+        delta.classList.add((d > 0) === t.upGood ? "good" : "bad");
+      }
+    } else delta.textContent = prev ? "no previous-period data" : " ";
+  }
+}
+
+// ---------- tables ----------
+function recentCallsCard(cur) {
+  const card = document.getElementById("card-recent-calls");
+  card.replaceChildren();
+  const head = div("card-head", card);
+  const h2 = document.createElement("h2"); h2.textContent = "Recent calls"; head.appendChild(h2);
+  div("desc", head, "latest first");
+  const wrap = div("tbl-wrap", card);
+  const rows = [...cur.calls]
+    .sort((a, b) => callDate(b) - callDate(a)).slice(0, 8)
+    .map(c => {
+      const fa = c.turns.map(t => t.first_audio_s).filter(v => v != null);
+      const cuts = c.turns.filter(t => t.interrupted).length;
+      return [fmtWhen(callDate(c)), c.agent_id, fmtDur(c.duration_s),
+              c.turns.length, fmtSecs(median(fa)), cuts || null];
+    });
+  if (!rows.length) return void div("empty", wrap, "No calls in this range");
+  buildTable(wrap, [
+    { label: "Started" }, { label: "Agent" }, { label: "Duration", num: true },
+    { label: "Turns", num: true }, { label: "Med. response", num: true },
+    { label: "Interruptions", num: true },
+  ], rows);
+}
+
+function bookingsCard(cur) {
+  const card = document.getElementById("card-bookings");
+  card.replaceChildren();
+  const head = div("card-head", card);
+  const h2 = document.createElement("h2"); h2.textContent = "Site-visit bookings"; head.appendChild(h2);
+  div("desc", head, "latest first");
+  const wrap = div("tbl-wrap", card);
+  const rows = [...cur.bookings]
+    .sort((a, b) => parseTs(b.ts) - parseTs(a.ts)).slice(0, 8)
+    .map(b => [fmtWhen(parseTs(b.ts)), b.name, `${b.day} ${b.time}`.trim(),
+               b.flat || null,
+               b.caller === "unknown" ? null : b.caller]);
+  if (!rows.length) return void div("empty", wrap, "No bookings in this range");
+  buildTable(wrap, [
+    { label: "Booked at" }, { label: "Visitor" }, { label: "Visit slot" },
+    { label: "Flat" }, { label: "Caller" },
+  ], rows);
+}
+
+// ---------- filters & render ----------
+function filterRow() {
+  const wrap = document.getElementById("filters");
+  wrap.replaceChildren();
+  for (const [label, days] of PRESETS) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.setAttribute("aria-pressed", String(days === RANGE_DAYS));
+    b.onclick = () => { RANGE_DAYS = days; render(); };
+    wrap.appendChild(b);
+  }
+}
+
+function render() {
+  if (!SNAPSHOT) return;
+  filterRow();
+  const { cur, prev } = sliceRange(RANGE_DAYS);
+  const daily = dailySeries(cur);
+  kpiTiles(cur, prev);
+  chartCallsPerDay(daily);
+  chartLatency(daily);
+  chartTurns(daily);
+  chartHistogram(allTurns(cur));
+  recentCallsCard(cur);
+  bookingsCard(cur);
+  document.getElementById("foot").textContent =
+    `Snapshot generated ${fmtWhen(parseTs(SNAPSHOT.generated_at))} · ` +
+    `${SNAPSHOT.calls.length} calls and ${SNAPSHOT.bookings.length} bookings on record`;
+}
+
+async function healthCheck() {
+  const pill = document.getElementById("health-pill"), text = document.getElementById("health-text");
+  try {
+    const r = await fetch("/health");
+    const j = await r.json();
+    pill.classList.toggle("ok", j.status === "ok");
+    text.textContent = j.status === "ok" ? "Runtime online" : "Runtime degraded";
+  } catch { text.textContent = "Runtime unreachable"; }
+}
+
+async function load() {
+  try {
+    const r = await fetch(`/dashboard/data?token=${encodeURIComponent(TOKEN)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    SNAPSHOT = await r.json();
+    render();
+  } catch (e) {
+    document.getElementById("kpis").replaceChildren();
+    div("empty", document.getElementById("kpis"),
+        `Could not load dashboard data (${e.message}). Check the ?token= in the URL.`);
+  }
+}
+
+let resizeTimer = null;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+
+healthCheck();
+load();
+setInterval(() => { healthCheck(); load(); }, 30000);
+</script>
+</body>
+</html>

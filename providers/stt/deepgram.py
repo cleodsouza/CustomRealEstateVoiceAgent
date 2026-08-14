@@ -132,6 +132,13 @@ class DeepgramSTT:
                     if data.get("is_final", False):
                         log.info("[STT Final] %s", transcript)
                         await self._on_event(STTEvent(kind="final", text=transcript))
+                        if data.get("speech_final", False):
+                            # Deepgram's endpointer (~300 ms) says the
+                            # utterance is over — much earlier than
+                            # UtteranceEnd (1 s). Consulted only when the
+                            # agent's endpointer policy trusts the provider.
+                            await self._on_event(
+                                STTEvent(kind="endpoint", text=""))
                     else:
                         log.debug("[STT Partial] %s", transcript)
                         await self._on_event(STTEvent(kind="partial", text=transcript))

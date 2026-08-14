@@ -47,6 +47,7 @@ def rig(monkeypatch):
         monkeypatch.setattr(config, "ENDPOINT_SILENCE_MS", 20)
         monkeypatch.setattr(config, "BARGEIN_MIN_FRAMES", 3)
         monkeypatch.setattr(config, "THINKING_FILLER", filler)
+        monkeypatch.setattr(config, "SPECULATIVE_REPLY", False)
         agent = agent_registry.resolve()
         transport = LocalTransport()
         bus = EventBus()
@@ -95,8 +96,11 @@ async def test_happy_path_event_sequence_and_latencies(rig):
         "SpeechStarted",     # greeting (turn 0)
         "SpeechEnded",
         "ThinkingStarted",   # user turn committed
+        "PhaseChanged",      # S3 mirror: pipeline entered "generating"
         "ThinkingFinished",  # first clause available
         "SpeechStarted",     # first reply audio
+        "PhaseChanged",      # S3 mirror: pipeline entered "done"
+        "TokenStreamEnded",  # S3 mirror: per-turn token aggregate
         "TurnCompleted",     # pipeline done (audio still draining)
         "SpeechEnded",       # playback drained at the carrier
     ]
@@ -113,6 +117,31 @@ async def test_happy_path_event_sequence_and_latencies(rig):
     assert turn.first_audio_s is not None and turn.first_audio_s >= 0
     # Greeting speech is turn 0; reply speech is turn 1
     assert [e.turn_seq for e in rec.only(events.SpeechStarted)] == [0, 1]
+
+
+async def test_stream_mirrors_carry_phases_and_token_aggregate(rig):
+    """S3: PhaseChanged mirrors the pipeline's phases in order; the token
+    stream settles into exactly one TokenStreamEnded with a real count and
+    a raw TTFT no larger than the clause-level thinking latency."""
+    sess, bus, rec = rig()
+    sess._llm.replies = [["एक वाक्य।"]]
+
+    await sess._dispatch(START)
+    await sess._speak_task
+    await sess._dispatch(PlaybackFinished())
+    await _user_turn(sess, "haan boliye")
+    await bus.flush()
+
+    phases = rec.only(events.PhaseChanged)
+    assert [(p.phase, p.turn_seq) for p in phases] == [
+        ("generating", 1), ("done", 1)]
+    ended = rec.only(events.TokenStreamEnded)
+    assert len(ended) == 1
+    assert ended[0].turn_seq == 1
+    assert ended[0].tokens >= 1
+    turn = rec.only(events.TurnCompleted)[0]
+    assert ended[0].first_token_s is not None
+    assert 0 <= ended[0].first_token_s <= turn.thinking_s
 
 
 async def test_bargein_emits_agent_interrupted(rig):
@@ -182,7 +211,6 @@ async def test_tool_audit_events(rig):
     failed = rec.only(events.ToolFailed)
     assert [(e.tool, e.error) for e in failed] == [
         ("send_brochure", "whatsapp api down")]
-
 
 async def test_empty_reply_emits_fallback_spoken(rig):
     sess, bus, rec = rig()

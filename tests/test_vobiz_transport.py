@@ -79,6 +79,41 @@ async def test_start_key_spelling_fallbacks():
     assert events[0] == CallStarted(stream_id="S9", call_id="C9", caller="+9199")
 
 
+async def test_start_nests_call_and_stream_id_in_production():
+    # Real Vobiz "start" frames nest callId/streamId under a "start" object
+    # rather than at the top level, and carry no caller number at all — the
+    # top-level fallback keys above only cover carrier variants/fixtures
+    # that flatten the shape.
+    ws = FakeWS([json.dumps({
+        "sequenceNumber": 0,
+        "event": "start",
+        "start": {
+            "callId": "5401fd2e-6344-40df-a22c-c8ffea7a92e7",
+            "streamId": "c4dfd815-a92a-4140-ab85-5ff28c004116",
+            "accountId": "500025",
+            "tracks": ["inbound"],
+            "mediaFormat": {"encoding": "audio/x-l16", "sampleRate": 16000},
+        },
+        "extra_headers": "{}",
+    })])
+    events = await collect_events(VobizTransport(ws))
+    assert events[0] == CallStarted(
+        stream_id="c4dfd815-a92a-4140-ab85-5ff28c004116",
+        call_id="5401fd2e-6344-40df-a22c-c8ffea7a92e7",
+        caller="unknown")
+
+
+async def test_caller_injected_at_construction_wins_over_start_frame():
+    # The caller's number never appears in the WS start frame; server.py
+    # threads it in from the /answer webhook's From param via the
+    # constructor instead.
+    ws = FakeWS([json.dumps({"event": "start", "start": {
+        "callId": "c1", "streamId": "s1"}})])
+    events = await collect_events(VobizTransport(ws, caller="+911234567890"))
+    assert events[0] == CallStarted(stream_id="s1", call_id="c1",
+                                    caller="+911234567890")
+
+
 # ------------------------------------------------------------------ outbound
 async def test_play_sends_exact_vobiz_shape():
     ws = FakeWS()

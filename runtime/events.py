@@ -162,11 +162,42 @@ class FallbackSpoken:
     turn_seq: int
 
 
+@dataclass(frozen=True)
+class PhaseChanged:
+    """Bus mirror of the reply pipeline's in-band Phase event (S3): the
+    turn's generator entered a new phase ("generating", "tool", "resuming",
+    "done"). Observational — the pipeline's consumer acts on the in-band
+    event; this exists for dashboards and analytics (Article VII). phase is
+    the TurnPhase value as a string so subscribers stay serialization-flat."""
+
+    call_id: str
+    turn_seq: int
+    phase: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class TokenStreamEnded:
+    """Per-turn token-stream aggregate, emitted when the pipeline yields
+    Done (S3). Deliberately ONE event per turn, not one per token — token-
+    granular bus traffic stays off unless a consumer demonstrates the need.
+    tokens counts delta-granular Token events (not model tokenizer tokens);
+    first_token_s is commit → first Token, the rawest time-to-first-token
+    the runtime can observe (turn_thinking_seconds includes clause
+    accumulation on top of it). A turn cancelled mid-stream never settles,
+    so it emits AgentInterrupted instead of this."""
+
+    call_id: str
+    turn_seq: int
+    tokens: int
+    first_token_s: float | None
+
+
 Event = (
     CallStarted | CallEnded | ThinkingStarted | ThinkingFinished
     | SpeechStarted | SpeechEnded | AgentInterrupted | TurnCompleted
     | ToolCalled | ToolSucceeded | ToolFailed | SessionClosed
-    | ProviderFailed | FallbackSpoken
+    | ProviderFailed | FallbackSpoken | PhaseChanged | TokenStreamEnded
 )
 
 Subscriber = Callable[[Event], Awaitable[None]]

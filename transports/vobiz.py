@@ -51,11 +51,15 @@ FRAME_SECONDS = 0.02  # Vobiz speaks 20 ms mu-law frames
 class VobizTransport:
     """Transport implementation over a Vobiz bidirectional stream WebSocket."""
 
-    def __init__(self, websocket: WebSocket):
+    def __init__(self, websocket: WebSocket, caller: str | None = None):
         self._ws = websocket
         self._send_lock = asyncio.Lock()
         self._stream_id: str | None = None
         self._next_send: float | None = None
+        # Vobiz's WS "start" frame carries no caller number at all — it must
+        # come from the /answer webhook's From param, threaded through the
+        # /ws query string by the caller of this constructor.
+        self._caller = caller
 
     @property
     def audio_format(self) -> AudioFormat:
@@ -82,12 +86,25 @@ class VobizTransport:
 
             event = data.get("event")
             if event == "start":
-                # Vobiz has shipped several key spellings; normalize them all.
-                self._stream_id = (data.get("streamId") or data.get("StreamID")
+                log.info("Vobiz start frame: %s", data)
+                # Vobiz nests the call/stream identifiers under a "start"
+                # object (confirmed against production captures), not at
+                # the top level — e.g. {"event": "start", "start":
+                # {"callId": ..., "streamId": ..., ...}}. Top-level keys are
+                # kept as a fallback for any carrier variant that flattens
+                # them (and for our own test fixtures).
+                start = data.get("start") or {}
+                self._stream_id = (start.get("streamId") or data.get("streamId")
+                                   or data.get("StreamID")
                                    or data.get("stream_id") or "default")
-                call_id = (data.get("callId") or data.get("CallID")
-                           or data.get("call_id") or "unknown")
-                caller = data.get("from") or data.get("From") or "unknown"
+                call_id = (start.get("callId") or data.get("callId")
+                           or data.get("CallID") or data.get("call_id")
+                           or "unknown")
+                # The start frame itself never carries a caller number —
+                # that has to be injected at construction time from the
+                # /answer webhook's From param (see server.py's /ws route).
+                caller = (self._caller or data.get("from")
+                          or data.get("From") or "unknown")
                 yield CallStarted(stream_id=self._stream_id, call_id=call_id,
                                   caller=caller)
             elif event == "media":

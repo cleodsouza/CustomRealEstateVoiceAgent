@@ -71,6 +71,7 @@ def _defaults() -> dict[str, dict[str, Any]]:
             "tool_dispatch": config.LLM_TOOL_DISPATCH,
             "history_max_messages": config.HISTORY_MAX_MESSAGES,
             "history_max_chars": config.HISTORY_MAX_CHARS,
+            "max_tool_rounds": config.LLM_MAX_TOOL_ROUNDS,
         },
         "turn": {
             "endpoint_silence_ms": config.ENDPOINT_SILENCE_MS,

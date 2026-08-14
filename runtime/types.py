@@ -52,10 +52,13 @@ class STTEvent:
 class ToolCallRequest:
     """A fully-assembled native tool call from the model. Adapters
     accumulate the provider's streaming fragments and emit one of these;
-    the runtime never sees half a tool call."""
+    the runtime never sees half a tool call. `id` is the provider's call
+    id when it surfaces one ("" otherwise) — feedback rounds (S4) need it
+    to correlate the tool-result message; a missing id is synthesized."""
 
     name: str
     args: dict
+    id: str = ""
 
 
 @dataclass(frozen=True)
