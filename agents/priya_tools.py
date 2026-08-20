@@ -175,7 +175,36 @@ def _normalize_flat(raw: str) -> str:
     return v
 
 
-async def book_site_visit(ctx: ToolContext, args: dict) -> None:
+def _booking_key(call_id: str, args: dict) -> tuple[str, str, str, str, str]:
+    return (
+        str(call_id),
+        str(args.get("day", "")).strip().casefold(),
+        str(args.get("time", "")).strip().casefold(),
+        str(args.get("name", "")).strip().casefold(),
+        _normalize_flat(args.get("flat", "")).casefold(),
+    )
+
+
+def _has_existing_booking(path: Path, key: tuple[str, str, str, str, str]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            existing = _booking_key(record.get("call_id", ""), record)
+            if existing == key and not record.get("duplicate_of"):
+                return True
+    except OSError:
+        raise
+    return False
+
+
+async def book_site_visit(ctx: ToolContext, args: dict) -> dict:
     """Book a site visit: save to JSONL and add to Google Calendar (M9).
 
     The booking record includes the caller's actual name (from args), not
@@ -185,21 +214,34 @@ async def book_site_visit(ctx: ToolContext, args: dict) -> None:
     # Use the name extracted from the LLM's [[BOOK ...]] marker
     visitor_name = args.get("name", "Unknown")
 
+    normalized_args = dict(args)
+    normalized_args["name"] = visitor_name
+    normalized_args["flat"] = _normalize_flat(args.get("flat", ""))
+    path = Path(ctx.agent.tool_config.get("bookings_path", "bookings.jsonl"))
+    key = _booking_key(ctx.call_id, normalized_args)
+
+    if await asyncio.to_thread(_has_existing_booking, path, key):
+        log.info(
+            "Duplicate booking suppressed: call=%s day=%s time=%s name=%s flat=%s",
+            ctx.call_id, normalized_args.get("day"), normalized_args.get("time"),
+            visitor_name, normalized_args.get("flat", ""),
+        )
+        return {"status": "already_confirmed", "key": list(key)}
+
     record = {
         "ts": datetime.now().isoformat(),
         "call_id": ctx.call_id,
         "caller_phone": ctx.caller_number,
         "caller": ctx.caller_name,
-        "visitor_name": visitor_name,  # The name the LLM extracted
-        **args,
-        "flat": _normalize_flat(args.get("flat", "")),
+        "visitor_name": visitor_name,
+        **normalized_args,
     }
-    path = Path(ctx.agent.tool_config.get("bookings_path", "bookings.jsonl"))
     await asyncio.to_thread(_append_line, path, record)
     log.info("Booking saved: %s", record)
 
     # Try to add to Google Calendar (multi-tenant, per-agent)
-    await _add_to_google_calendar(ctx, args)
+    await _add_to_google_calendar(ctx, normalized_args)
+    return {"status": "created", "booking": record}
 
 
 # ----------------------------------------------------------------- brochure

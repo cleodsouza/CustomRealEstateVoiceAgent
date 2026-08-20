@@ -137,6 +137,10 @@ def _build_providers(agent: AgentConfig) -> _Providers:
         language=agent.voice.language,
         pace=agent.voice.pace,
         preprocessing=config.TTS_PREPROCESSING,
+        streaming_min_buffer_size=config.TTS_STREAM_MIN_BUFFER_SIZE,
+        streaming_max_chunk_length=config.TTS_STREAM_MAX_CHUNK_LENGTH,
+        streaming_sample_rate=config.TTS_STREAM_SAMPLE_RATE,
+        streaming_audio_queue=config.TTS_STREAM_AUDIO_QUEUE,
     ), breaker=CircuitBreaker(), attempt_timeout_s=config.TTS_ATTEMPT_TIMEOUT_S))
     # Opportunistic prewarm of the agent's static lines so even the first
     # call's greeting starts instantly; fire-and-forget off the hot path.

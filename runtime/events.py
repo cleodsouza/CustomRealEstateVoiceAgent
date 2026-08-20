@@ -107,8 +107,11 @@ class AgentInterrupted:
 
 @dataclass(frozen=True)
 class TurnCompleted:
-    """One user turn's reply pipeline finished (fully spoken or cut short).
-    Latencies are None when the turn never got that far."""
+    """One user turn's reply pipeline finished.
+
+    ``thinking_s`` and ``first_audio_s`` are retained for compatibility.
+    The additional fields give the real-time latency breakdown.
+    """
 
     call_id: str
     turn_seq: int
@@ -117,7 +120,12 @@ class TurnCompleted:
     thinking_s: float | None
     first_audio_s: float | None
     interrupted: bool
-
+    endpoint_s: float | None = None
+    llm_ttft_s: float | None = None
+    first_text_s: float | None = None
+    tts_to_audio_s: float | None = None
+    llm_done_s: float | None = None
+    generation_s: float | None = None
 
 @dataclass(frozen=True)
 class ToolCalled:

@@ -50,6 +50,13 @@ class CachedTTS:
         probe = getattr(self._inner, "healthy", None)
         return await probe() if probe is not None else True
 
+    def stream_text(self, text_stream, fmt):
+        """Live replies bypass the replay cache and stream through directly."""
+        stream = getattr(self._inner, "stream_text", None)
+        if stream is None:
+            raise AttributeError("inner TTS does not support streaming input")
+        return stream(text_stream, fmt)
+
     async def prewarm(self, texts: list[str], fmt: AudioFormat) -> None:
         """Synthesize static lines into the cache ahead of need (e.g. the
         greeting at provider build, so even call #1 starts instantly).

@@ -83,6 +83,12 @@ TTS_PACE = float(os.getenv("TTS_PACE", "1.05"))           # only pace works on v
 # trip (no partial frames until the whole clause is synthesized), so this
 # must cover real Bulbul v3 latency, not just a dead-socket timeout.
 TTS_ATTEMPT_TIMEOUT_S = float(os.getenv("TTS_ATTEMPT_TIMEOUT_S", "8.0"))
+# Live Sarvam TTS WebSocket tuning. Smaller buffers reduce first-audio latency;
+# audio is emitted as 20 ms mu-law frames for Vobiz.
+TTS_STREAM_MIN_BUFFER_SIZE = int(os.getenv("TTS_STREAM_MIN_BUFFER_SIZE", "30"))
+TTS_STREAM_MAX_CHUNK_LENGTH = int(os.getenv("TTS_STREAM_MAX_CHUNK_LENGTH", "120"))
+TTS_STREAM_SAMPLE_RATE = int(os.getenv("TTS_STREAM_SAMPLE_RATE", "8000"))
+TTS_STREAM_AUDIO_QUEUE = int(os.getenv("TTS_STREAM_AUDIO_QUEUE", "96"))
 # Ask the TTS provider to normalize numerals / mixed-language text before
 # synthesis ("600" spoken as a number, not digit-by-digit). The Sarvam
 # adapter self-heals if the endpoint rejects the flag.
@@ -92,7 +98,7 @@ TTS_PREPROCESSING = os.getenv("TTS_PREPROCESSING", "true").strip().lower() == "t
 # Turn-taking / latency tuning
 # ---------------------------------------------------------------------------
 # Silence after last final transcript before we treat the turn as finished.
-ENDPOINT_SILENCE_MS = int(os.getenv("ENDPOINT_SILENCE_MS", "550"))
+ENDPOINT_SILENCE_MS = int(os.getenv("ENDPOINT_SILENCE_MS", "450"))
 # End-of-turn strategy: "fixed" = the silence window above; "provider" =
 # trust the STT's endpoint events (Deepgram UtteranceEnd) with the silence
 # window kept armed as a safety fallback. Capability-gated: falls back to
@@ -101,11 +107,11 @@ ENDPOINTER = os.getenv("ENDPOINTER", "fixed")
 # Barge-in: energy threshold + consecutive 20 ms frames of speech that must
 # arrive while the agent is talking before we cut its audio.
 BARGEIN_RMS_THRESHOLD = float(os.getenv("BARGEIN_RMS_THRESHOLD", "650"))
-BARGEIN_MIN_FRAMES = int(os.getenv("BARGEIN_MIN_FRAMES", "25"))  # ~500 ms
+BARGEIN_MIN_FRAMES = int(os.getenv("BARGEIN_MIN_FRAMES", "8"))  # ~160 ms
 VAD_AGGRESSIVENESS = int(os.getenv("VAD_AGGRESSIVENESS", "2"))   # 0–3; 2 = balanced
 # A mid-speech partial only interrupts the agent after it has held the floor
 # this long — below it, the partial is likely the agent's own audio echoing.
-PARTIAL_INTERRUPT_AFTER_S = float(os.getenv("PARTIAL_INTERRUPT_AFTER_S", "0.5"))
+PARTIAL_INTERRUPT_AFTER_S = float(os.getenv("PARTIAL_INTERRUPT_AFTER_S", "0.35"))
 # S7: start the reply pipeline (LLM + first-clause TTS) speculatively at
 # each STT final, DURING the endpoint silence window; the commit adopts the
 # running generation when the text matches, or discards it. Costs the odd

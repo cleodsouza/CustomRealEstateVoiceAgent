@@ -24,12 +24,12 @@ HARD_BREAKS = "।?!.\n"
 # trip before any sound. A 10-char floor ships that opener to TTS
 # immediately (a sub-second synthesis); synth-ahead hides the rest under
 # its playback. MIN_CHUNK keeps later clauses long for prosody.
-MIN_FIRST_CHUNK = 10     # start speaking fast: flush the first clause early
+MIN_FIRST_CHUNK = 1     # start speaking fast: flush the first clause early
 # S7.2: 180 → 100. The one-go pitch produced ~230-char middle clauses that
 # blew the 8 s TTS attempt budget (observed: timeout + full retry = 14 s of
 # dead air). ~100 chars synthesizes in 2-4 s — under the budget — while its
 # predecessor's playback (6-9 s) still covers it, so the chain stays gapless.
-MIN_CHUNK = 100          # later chunks: long enough for prosody, small enough for TTS
+MIN_CHUNK = 60          # later chunks: long enough for prosody, small enough for TTS
 
 
 async def stream_clauses(deltas: AsyncIterator[LLMDelta]) -> AsyncIterator[str]:

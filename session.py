@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from typing import AsyncIterator
 
 import webrtcvad
 
@@ -236,15 +237,6 @@ class CallSession:
     async def _on_stt_event(self, ev: STTEvent) -> None:
         if ev.kind == "partial":
             await self._execute(self._engine.stt_partial(self._now()))
-            # S7.2: interim transcripts stabilize to the final well before
-            # the endpoint — speculate from them to buy back the LLM TTFT
-            # that instant provider endpointing took away. Gated to states
-            # where the caller genuinely holds the floor (echo partials
-            # during agent speech would speculate on garbage).
-            if ev.text and self._engine.state in (TurnState.LISTENING,
-                                                  TurnState.USER_SPEAKING):
-                self._start_speculation(
-                    (self._spec_accum + " " + ev.text).strip())
         elif ev.kind == "final":
             log.info("STT FINAL: %s", ev.text)
             self._spec_accum = (self._spec_accum + " " + ev.text).strip()
@@ -393,7 +385,12 @@ class CallSession:
                 spec.events.append(ev)
                 if isinstance(ev, TurnClause):
                     spec.first_text = ev.text
-                    spec.first_frames = await self._synth(ev.text)
+                    # Live TTS has no reason to pre-synthesize a REST-style
+                    # clause. We still prefetch the LLM head during the
+                    # endpoint window, then feed that head into the live
+                    # WebSocket once the turn commits.
+                    if not self._supports_live_tts():
+                        spec.first_frames = await self._synth(ev.text)
                     return
 
         spec.task = asyncio.create_task(_prefetch())
@@ -416,7 +413,16 @@ class CallSession:
         async for ev in spec.gen:
             yield ev
 
+    def _supports_live_tts(self) -> bool:
+        return callable(getattr(self.tts, "stream_text", None))
+
     async def _generate_and_speak(self, seq: int, play_filler: bool) -> None:
+        # Live Sarvam path: LLM text and TTS audio overlap. All legacy TTS
+        # adapters continue through the original clause+synth-ahead path.
+        if self._supports_live_tts():
+            await self._generate_and_speak_streaming(seq, play_filler)
+            return
+
         spoken: list[str] = []
         frames = 0
         interrupted = False
@@ -603,6 +609,195 @@ class CallSession:
                 call_id=self._cid(), turn_seq=seq,
                 user_text=self._last_user, agent_text=" ".join(spoken),
                 thinking_s=self._thinking_s,
+                first_audio_s=self._first_audio_s,
+                interrupted=interrupted))
+            await self._execute(
+                self._engine.speaking_finished(seq, any_audio=frames > 0))
+
+    async def _generate_and_speak_streaming(self, seq: int, play_filler: bool) -> None:
+        """True live reply path: LLM -> incremental text -> Sarvam WS -> Vobiz."""
+        spoken: list[str] = []
+        submitted: list[tuple[str, bool]] = []
+        frames = 0
+        interrupted = False
+        done_context: tuple = ()
+        token_count = 0
+        first_token_s: float | None = None
+
+        self.messages = trim_history(
+            self.messages,
+            max_messages=self.agent.llm.history_max_messages,
+            max_chars=self.agent.llm.history_max_chars)
+
+        spec = self._speculation
+        self._speculation = None
+        adopted = (
+            spec is not None
+            and _normalize_utterance(spec.text) == _normalize_utterance(self._last_user)
+            and spec.history_len == len(self.messages) - 1
+        )
+        if spec is not None and not adopted:
+            spec.abandon()
+
+        if adopted:
+            assert spec is not None
+            spec.adopted.set()
+            for name, args in spec.queued_tools:
+                self._dispatch_tool(name, args)
+            spec.queued_tools.clear()
+            gen = self._adopted_stream(spec)
+        else:
+            gen = self._tooling.run(
+                self._llm,
+                self.messages,
+                self._dispatch_tool,
+                await_tool=self._await_tool,
+            )
+
+        async def text_source() -> AsyncIterator[str]:
+            """Convert the typed turn stream into small live TTS chunks.
+
+            We deliberately consume Token events here rather than waiting for
+            Clause events. Token events are marker-guarded, so they are safe to
+            speak incrementally. This is the key batch->realtime boundary:
+            the Sarvam WebSocket gets roughly 30-50 characters at a time while
+            the LLM is still generating the rest of the answer.
+            """
+            nonlocal token_count, first_token_s, done_context
+
+            live_buf = ""
+            TARGET_CHARS = 42
+
+            def take_chunk(force: bool = False) -> str | None:
+                nonlocal live_buf
+                if not live_buf.strip():
+                    return None
+                if not force and len(live_buf) < TARGET_CHARS:
+                    return None
+
+                # Prefer punctuation or whitespace near the target so we don't
+                # routinely cut in the middle of a word.
+                boundary_chars = " ।?!.,;:\n"
+                cut = None
+                upper = min(len(live_buf), TARGET_CHARS + 20)
+                for i in range(upper - 1, max(0, TARGET_CHARS - 20) - 1, -1):
+                    if live_buf[i] in boundary_chars:
+                        cut = i + 1
+                        break
+
+                if cut is None:
+                    cut = TARGET_CHARS if len(live_buf) >= TARGET_CHARS else len(live_buf)
+
+                chunk = live_buf[:cut].strip()
+                live_buf = live_buf[cut:]
+                return chunk or None
+
+            async for ev in gen:
+                if isinstance(ev, turn_events.Token):
+                    token_count += 1
+                    if first_token_s is None and self._turn_t0 is not None:
+                        first_token_s = self._now() - self._turn_t0
+
+                    live_buf += ev.text
+                    # Drain one chunk per token event when enough text is ready.
+                    while True:
+                        chunk = take_chunk(force=False)
+                        if chunk is None:
+                            break
+                        log.info("LLM live chunk: %s", chunk)
+                        submitted.append((chunk, True))
+                        yield chunk
+
+                elif isinstance(ev, turn_events.Phase):
+                    self._bus.emit(events.PhaseChanged(
+                        call_id=self._cid(), turn_seq=seq,
+                        phase=ev.phase.value, detail=ev.detail))
+                    if ev.phase is turn_events.TurnPhase.TOOL:
+                        # Flush normal text before the hold line so the hold
+                        # doesn't leapfrog content already generated.
+                        chunk = take_chunk(force=True)
+                        if chunk:
+                            submitted.append((chunk, True))
+                            yield chunk
+                        hold = str(self.agent.tool_config.get("hold_line") or "")
+                        if hold and not self._engine.is_stale(seq):
+                            submitted.append((hold, False))
+                            yield hold
+
+                elif isinstance(ev, turn_events.Done):
+                    done_context = ev.context
+                    chunk = take_chunk(force=True)
+                    if chunk:
+                        submitted.append((chunk, True))
+                        yield chunk
+                    self._bus.emit(events.TokenStreamEnded(
+                        call_id=self._cid(), turn_seq=seq,
+                        tokens=token_count, first_token_s=first_token_s))
+
+        try:
+            # Mark the engine as speaking before the first audio byte can
+            # arrive. This arms barge-in while the TTS socket is generating.
+            await self._execute(self._engine.speaking_started(seq, self._now()))
+
+            # Do not serialize a legacy filler in front of the live TTS
+            # stream. The whole point of this path is overlapping LLM→TTS→
+            # carrier work; a filler here would reintroduce a blocking turn.
+            audio_seen = False
+            async for frame in self.tts.stream_text(text_source(), MULAW_8K):
+                if self._engine.is_stale(seq):
+                    interrupted = True
+                    return
+                if not audio_seen:
+                    audio_seen = True
+                    self._speech_started = True
+                    if self._turn_t0 is not None:
+                        self._first_audio_s = self._now() - self._turn_t0
+                    self._bus.emit(events.SpeechStarted(
+                        call_id=self._cid(), turn_seq=seq))
+                await self._transport.play(frame)
+                frames += 1
+                if self._recorder:
+                    asyncio.create_task(
+                        self._recorder.record_agent_frame(frame.payload))
+
+            if frames:
+                await self._transport.checkpoint(f"turn-{seq}")
+
+            if audio_seen:
+                # Streaming audio is not addressable to individual LLM clauses
+                # after the carrier boundary. For a normally completed turn,
+                # everything the TTS stream accepted is considered spoken.
+                spoken.extend(text for text, in_history in submitted if in_history)
+
+            if (not spoken and not self._turn_had_tools
+                    and not self._engine.is_stale(seq)
+                    and self.agent.turn.fallback_line):
+                log.warning("Turn %d live stream produced no audio; fallback", seq)
+                self._bus.emit(events.FallbackSpoken(
+                    call_id=self._cid(), turn_seq=seq))
+                frames += await self._speak(self.agent.turn.fallback_line, seq)
+        except asyncio.CancelledError:
+            interrupted = True
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error("live TTS pipeline failed: %s", exc)
+            if (not self._turn_had_tools
+                    and not self._engine.is_stale(seq)
+                    and self.agent.turn.fallback_line):
+                self._bus.emit(events.FallbackSpoken(
+                    call_id=self._cid(), turn_seq=seq))
+                frames += await self._speak(self.agent.turn.fallback_line, seq)
+        finally:
+            if done_context:
+                self.messages.extend(dict(m) for m in done_context)
+            if spoken:
+                reply = " ".join(spoken)
+                self.messages.append({"role": "assistant", "content": reply})
+                log.info("PRIYA: %s", reply)
+            self._bus.emit(events.TurnCompleted(
+                call_id=self._cid(), turn_seq=seq,
+                user_text=self._last_user, agent_text=" ".join(spoken),
+                thinking_s=(self._now() - self._turn_t0) if self._turn_t0 else None,
                 first_audio_s=self._first_audio_s,
                 interrupted=interrupted))
             await self._execute(

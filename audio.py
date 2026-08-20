@@ -79,6 +79,20 @@ def pcm16_to_vobiz_frames(pcm: np.ndarray, src_rate: int) -> list[bytes]:
     return [ulaw[i:i + FRAME_BYTES] for i in range(0, len(ulaw), FRAME_BYTES)]
 
 
+
+
+def pcm16le_bytes_to_vobiz_frames(raw: bytes, src_rate: int) -> list[bytes]:
+    """Convert a raw little-endian PCM16 chunk into Vobiz 20 ms mu-law frames."""
+    if not raw:
+        return []
+    if len(raw) % 2:
+        raw = raw[:-1]
+    if not raw:
+        return []
+    pcm = np.frombuffer(raw, dtype="<i2")
+    return pcm16_to_vobiz_frames(pcm, src_rate=src_rate)
+
+
 def rms(pcm: np.ndarray) -> float:
     if len(pcm) == 0:
         return 0.0

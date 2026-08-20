@@ -85,6 +85,33 @@ class ResilientTTS:
         probe = getattr(self._inner, "healthy", None)
         return await probe() if probe is not None else True
 
+    def stream_text(self, text_stream, fmt):
+        """Stream a live reply without buffering or replaying partial audio."""
+        stream = getattr(self._inner, "stream_text", None)
+        if stream is None:
+            raise AttributeError("inner TTS does not support streaming input")
+
+        async def _wrapped():
+            if not self._breaker.allow():
+                log.warning("TTS breaker open; skipping live synthesis")
+                return
+            yielded = False
+            try:
+                async for frame in stream(text_stream, fmt):
+                    yielded = True
+                    yield frame
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self._breaker.record_failure()
+                log.warning("Live TTS failed: %s", str(e) or type(e).__name__)
+                raise
+            else:
+                if yielded:
+                    self._breaker.record_success()
+
+        return _wrapped()
+
     async def synthesize(self, text: str,
                          fmt: AudioFormat) -> AsyncIterator[AudioFrame]:
         if not self._breaker.allow():

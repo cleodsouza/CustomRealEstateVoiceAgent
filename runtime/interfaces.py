@@ -63,6 +63,12 @@ class TTS(Protocol):
 
     def synthesize(self, text: str, fmt: AudioFormat) -> AsyncIterator[AudioFrame]: ...
 
+    # Optional live-call capability. Implementations that expose this method
+    # can consume incremental LLM text while producing audio concurrently.
+    # The session discovers it structurally so legacy adapters remain valid.
+    def stream_text(self, text_stream: AsyncIterator[str],
+                    fmt: AudioFormat) -> AsyncIterator[AudioFrame]: ...
+
 
 class LLM(Protocol):
     def stream(self, messages: list[Any],

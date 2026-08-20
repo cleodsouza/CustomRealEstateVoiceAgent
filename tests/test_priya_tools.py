@@ -133,6 +133,21 @@ def test_priya_record_lists_her_tools():
     assert agent.llm.tool_dispatch == "marker"  # inherited engine default
 
 
+async def test_duplicate_booking_is_suppressed(tmp_path):
+    store = tmp_path / "bookings.jsonl"
+    ctx = make_ctx(tool_config={"bookings_path": str(store)})
+
+    first = await priya_tools.book_site_visit(
+        ctx, {"day": "Sunday", "time": "2pm", "name": "Rahul", "flat": "2 BHK"})
+    second = await priya_tools.book_site_visit(
+        ctx, {"day": "Sunday", "time": "2pm", "name": "Rahul", "flat": "2BHK"})
+
+    records = [json.loads(line) for line in store.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert first["status"] == "created"
+    assert second["status"] == "already_confirmed"
+
+
 async def test_booking_records_normalized_flat_type(tmp_path):
     store = tmp_path / "bookings.jsonl"
     ctx = make_ctx(tool_config={"bookings_path": str(store)})
